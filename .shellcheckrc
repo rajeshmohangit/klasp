@@ -1,0 +1,12 @@
+# shellcheck configuration for KLASP
+#
+# SC2016 is disabled globally: the emit/validate/cue-vet scripts intentionally
+# embed gomplate expressions (e.g. '{{ index $e "key" }}') inside single quotes
+# so the '$e'/'$r'/'$b' datasource references reach the rendered template
+# literally rather than being expanded by the shell. This is correct and
+# deliberate, so shellcheck's "expressions don't expand in single quotes"
+# warning is a false positive for this codebase.
+disable=SC2016
+
+# Follow sourced files where resolvable.
+external-sources=true

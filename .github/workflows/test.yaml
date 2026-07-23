@@ -1,0 +1,76 @@
+name: KLASP CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Shellcheck (scripts)
+        # Fail on error+warning; info/style are advisory. Covers the ~2.1k
+        # lines of shell orchestration — the largest language in the repo.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck --version
+          shellcheck --severity=warning scripts/*.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Ruff (Python lint)
+        run: |
+          pip install "ruff==0.15.22"
+          ruff check src/ tests/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install "PyYAML==6.0.2" "pytest==8.3.3" "pytest-cov==5.0.0"
+
+      - name: Install tools
+        # Pinned to the versions recorded in the SBOM manifest (scripts/emit-oci.sh)
+        # for reproducible CI runs.
+        env:
+          YQ_VERSION: v4.52.1
+          GOMPLATE_VERSION: v5.1.0
+          CUE_VERSION: v0.11.0
+        run: |
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+          sudo wget -qO /usr/local/bin/gomplate "https://github.com/hairyhenderson/gomplate/releases/download/${GOMPLATE_VERSION}/gomplate_linux-amd64"
+          sudo chmod +x /usr/local/bin/gomplate
+          wget -qO- "https://github.com/cue-lang/cue/releases/download/${CUE_VERSION}/cue_${CUE_VERSION}_linux_amd64.tar.gz" | sudo tar -xzf - -C /usr/local/bin cue
+
+      - name: Run unit tests with coverage
+        run: python -m pytest tests/ -v --cov=src --cov-report=term-missing --cov-report=xml
+
+      - name: Run integration test suite
+        run: task test

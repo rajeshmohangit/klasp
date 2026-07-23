@@ -1,0 +1,204 @@
+name: 'KLASP: Build & Push Deployer Image'
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Build mode'
+        required: true
+        type: choice
+        options:
+          - online
+          - airgap
+        default: online
+      release:
+        description: 'Release name (used as image tag, e.g., v1)'
+        required: true
+        type: string
+      manifest:
+        description: 'Path to manifest YAML (e.g., examples/multi-chart.yaml)'
+        required: true
+        type: string
+        default: 'examples/multi-chart.yaml'
+
+  workflow_call:
+    inputs:
+      mode:
+        required: true
+        type: string
+      release:
+        required: true
+        type: string
+      manifest:
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/klasp-deployer
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ inputs.release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.0
+
+      - name: Install tools
+        # Pinned to the versions recorded in the SBOM manifest (scripts/emit-oci.sh).
+        env:
+          YQ_VERSION: v4.52.1
+          GOMPLATE_VERSION: v5.1.0
+          CUE_VERSION: v0.11.0
+        run: |
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+          sudo wget -qO /usr/local/bin/gomplate "https://github.com/hairyhenderson/gomplate/releases/download/${GOMPLATE_VERSION}/gomplate_linux-amd64"
+          sudo chmod +x /usr/local/bin/gomplate
+          wget -qO- "https://github.com/cue-lang/cue/releases/download/${CUE_VERSION}/cue_${CUE_VERSION}_linux_amd64.tar.gz" | sudo tar -xzf - -C /usr/local/bin cue
+
+      - name: Generate
+        run: task generate-multi MANIFEST="${{ inputs.manifest }}"
+
+      - name: Validate
+        run: |
+          MANIFEST="${{ inputs.manifest }}"
+          CHARTS=$(yq -r '.charts | length' "$MANIFEST")
+          for cidx in $(seq 0 $((CHARTS - 1))); do
+            c_app=$(yq -r ".charts[$cidx].app_name // .charts[$cidx].name" "$MANIFEST")
+            task validate APP_NAME="$c_app"
+            task cue-vet APP_NAME="$c_app"
+          done
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: klasp-deployer-build
+          path: |
+            output/golden-configuration/
+            output/presets/
+            output/oci/
+            base/
+            scripts/apply.sh
+            scripts/publish-binaries.sh
+            environments/
+          retention-days: 1
+
+  build-push:
+    runs-on: ubuntu-latest
+    needs: generate
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: klasp-deployer-build
+
+      - name: Pull artifacts (airgap mode only)
+        if: inputs.mode == 'airgap'
+        run: |
+          # Install tools needed for pull
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.52.1/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          sudo wget -qO /usr/local/bin/skopeo https://github.com/lework/skopeo-binary/releases/download/v1.21.0/skopeo-linux-amd64
+          sudo chmod +x /usr/local/bin/skopeo
+          sudo wget -qO- https://get.helm.sh/helm-v3.16.0-linux-amd64.tar.gz | sudo tar -xzf - -C /usr/local/bin --strip-components=1 linux-amd64/helm
+
+          # Install Task for oci/Taskfile
+          curl -sSL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin
+
+          cd output/oci
+          task pull
+
+      - name: Prepare build context
+        run: |
+          mkdir -p build-context/golden-configuration build-context/presets
+          mkdir -p build-context/environments build-context/oci
+          mkdir -p build-context/base build-context/scripts
+
+          # Generated outputs
+          cp -r output/golden-configuration/* build-context/golden-configuration/ 2>/dev/null || true
+          cp -r output/presets/* build-context/presets/ 2>/dev/null || true
+          cp -r output/oci/* build-context/oci/
+
+          # Deployer base templates and scripts (from repo root)
+          cp -r base/* build-context/base/
+          cp scripts/apply.sh build-context/scripts/apply.sh
+
+          # Environment files
+          cp -r environments/* build-context/environments/ 2>/dev/null || true
+
+          # Taskfile for the container entrypoint
+          printf '%s\n' \
+            "version: '3'" \
+            "tasks:" \
+            "  default:" \
+            "    silent: true" \
+            "    cmd: task --list" \
+            "  apply:" \
+            '    desc: "Bootstrap deployer into cluster (render base templates + kubectl apply)"' \
+            "    silent: true" \
+            "    vars:" \
+            "      ENV: '{{.ENV | default \"local\"}}'" \
+            "    preconditions:" \
+            "      - sh: command -v gomplate >/dev/null" \
+            '        msg: "gomplate is required"' \
+            "      - sh: command -v kubectl >/dev/null" \
+            '        msg: "kubectl is required"' \
+            "    cmds:" \
+            '      - bash scripts/apply.sh "{{.ENV}}" .' \
+            > build-context/Taskfile.yaml
+
+          echo "=== Build context contents ==="
+          find build-context -type f | sort
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: build-context
+          file: build-context/oci/Dockerfile.${{ inputs.mode == 'airgap' && 'airgap' || 'online' }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.release }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.release }}-${{ inputs.mode }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=KLASP deployer (${{ inputs.mode }}) - Release ${{ inputs.release }}
+
+      - name: Summary
+        run: |
+          echo "## Build & Push Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.release }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Mode:** ${{ inputs.mode }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** ${{ inputs.release }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull command" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.release }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

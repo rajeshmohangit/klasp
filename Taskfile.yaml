@@ -1,0 +1,473 @@
+version: '3'
+
+set: [pipefail]
+shopt: [globstar]
+
+vars:
+  OUTPUT_DIR: ./output
+  CHARTS_DIR: ./charts
+
+tasks:
+  default:
+    silent: true
+    cmd: task --list
+
+  generate:
+    desc: "Full pipeline: fetch chart, render, analyze, generate all outputs"
+    silent: true
+    vars:
+      CHART_REPO: '{{.CHART_REPO | default ""}}'
+      CHART_NAME: '{{.CHART_NAME | default ""}}'
+      CHART_VERSION: '{{.CHART_VERSION | default ""}}'
+      APP_NAME: '{{.APP_NAME | default .CHART_NAME}}'
+      RELEASE: '{{.RELEASE | default .APP_NAME | default .CHART_NAME}}'
+    preconditions:
+      - sh: command -v helm >/dev/null
+        msg: "helm is required"
+      - sh: command -v yq >/dev/null
+        msg: "yq is required"
+      - sh: command -v jq >/dev/null
+        msg: "jq is required"
+    cmds:
+      - task: fetch
+        vars: { CHART_REPO: "{{.CHART_REPO}}", CHART_NAME: "{{.CHART_NAME}}", CHART_VERSION: "{{.CHART_VERSION}}" }
+      - task: render
+        vars: { CHART_NAME: "{{.CHART_NAME}}", CHART_VERSION: "{{.CHART_VERSION}}", APP_NAME: "{{.APP_NAME}}" }
+      - task: analyze
+        vars: { APP_NAME: "{{.APP_NAME}}" }
+      - task: emit
+        vars: { APP_NAME: "{{.APP_NAME}}", CHART_REPO: "{{.CHART_REPO}}", CHART_NAME: "{{.CHART_NAME}}", CHART_VERSION: "{{.CHART_VERSION}}", RELEASE: "{{.RELEASE}}" }
+      - task: emit-oci
+        vars: { RELEASE: "{{.RELEASE}}" }
+
+  generate-multi:
+    desc: "Full pipeline for multiple charts from a manifest file"
+    silent: true
+    vars:
+      MANIFEST: '{{.MANIFEST}}'
+    preconditions:
+      - sh: command -v helm >/dev/null
+        msg: "helm is required"
+      - sh: command -v yq >/dev/null
+        msg: "yq is required"
+      - sh: command -v jq >/dev/null
+        msg: "jq is required"
+      - sh: test -f "{{.MANIFEST}}"
+        msg: "manifest {{.MANIFEST}} not found"
+    cmds:
+      - |
+        echo "=== Multi-chart mode: {{.MANIFEST}} ==="
+        PRODUCT=$(yq '.product' "{{.MANIFEST}}")
+        RELEASE=$(yq -r '.release // .product' "{{.MANIFEST}}")
+        CHARTS=$(yq -r '.charts | length' "{{.MANIFEST}}")
+        echo "  Product: $PRODUCT | Release: $RELEASE ($CHARTS charts)"
+
+        for cidx in $(seq 0 $((CHARTS - 1))); do
+          c_repo=$(yq -r ".charts[$cidx].repo" "{{.MANIFEST}}")
+          c_name=$(yq -r ".charts[$cidx].name" "{{.MANIFEST}}")
+          c_version=$(yq -r ".charts[$cidx].version" "{{.MANIFEST}}")
+          c_app=$(yq -r ".charts[$cidx].app_name // \"$c_name\"" "{{.MANIFEST}}")
+
+          echo ""
+          echo "--- Chart $((cidx+1))/$CHARTS: $c_name ($c_version) as $c_app ---"
+          task generate \
+            CHART_REPO="$c_repo" \
+            CHART_NAME="$c_name" \
+            CHART_VERSION="$c_version" \
+            APP_NAME="$c_app" \
+            RELEASE="$RELEASE"
+
+          # Rename per-app intermediates for later merge
+          mv "{{.OUTPUT_DIR}}/evars.yaml" "{{.OUTPUT_DIR}}/evars-${c_app}.yaml"
+          mv "{{.OUTPUT_DIR}}/presets/build/${RELEASE}.yaml" "{{.OUTPUT_DIR}}/presets/build/${c_app}-${RELEASE}.yaml"
+          mv "{{.OUTPUT_DIR}}/presets/resource/$RELEASE/default.yaml" "{{.OUTPUT_DIR}}/presets/resource/$RELEASE/${c_app}-default.yaml"
+        done
+      - task: merge-outputs
+        vars: { MANIFEST: "{{.MANIFEST}}" }
+      - |
+        RELEASE=$(yq -r '.release // .product' "{{.MANIFEST}}")
+        bash scripts/emit-oci.sh "{{.MANIFEST}}" "$RELEASE" "{{.OUTPUT_DIR}}"
+
+  fetch:
+    desc: "Fetch helm chart from repository"
+    silent: true
+    vars:
+      CHART_REPO: '{{.CHART_REPO}}'
+      CHART_NAME: '{{.CHART_NAME}}'
+      CHART_VERSION: '{{.CHART_VERSION}}'
+    cmds:
+      - mkdir -p {{.CHARTS_DIR}}
+      - |
+        CHART_FILE="{{.CHARTS_DIR}}/{{.CHART_NAME}}-{{.CHART_VERSION}}.tgz"
+        if [ -f "$CHART_FILE" ]; then
+          echo "  SKIP fetch: $CHART_FILE (exists)"
+        else
+          REPO_URL="{{.CHART_REPO}}"
+          if echo "$REPO_URL" | grep -q '^oci://'; then
+            echo "  Fetching OCI chart: ${REPO_URL}/{{.CHART_NAME}}:{{.CHART_VERSION}}"
+            helm pull "${REPO_URL}/{{.CHART_NAME}}" \
+              --version "{{.CHART_VERSION}}" \
+              --destination "{{.CHARTS_DIR}}"
+          elif [ -d "$REPO_URL" ]; then
+            echo "  Packaging local chart: $REPO_URL → $CHART_FILE"
+            helm package "$REPO_URL" \
+              --version "{{.CHART_VERSION}}" \
+              --destination "{{.CHARTS_DIR}}"
+          else
+            REPO_ALIAS="temp-$(echo "{{.CHART_NAME}}" | tr '.' '-')"
+            helm repo add "$REPO_ALIAS" "$REPO_URL" 2>/dev/null || true
+            helm repo update "$REPO_ALIAS" 2>/dev/null || true
+            echo "  Fetching chart: $REPO_ALIAS/{{.CHART_NAME}}:{{.CHART_VERSION}}"
+            helm pull "$REPO_ALIAS/{{.CHART_NAME}}" \
+              --version "{{.CHART_VERSION}}" \
+              --destination "{{.CHARTS_DIR}}"
+            helm repo remove "$REPO_ALIAS" 2>/dev/null || true
+          fi
+          echo "  Fetched: $CHART_FILE"
+        fi
+
+        VALUES_FILE="{{.CHARTS_DIR}}/{{.CHART_NAME}}-{{.CHART_VERSION}}-values.yaml"
+        if [ ! -f "$VALUES_FILE" ]; then
+          CHART_DIR_IN_TGZ=$(tar -tzf "$CHART_FILE" 2>/dev/null | head -1 | cut -d'/' -f1) || true
+          tar -xzf "$CHART_FILE" -O "${CHART_DIR_IN_TGZ}/values.yaml" > "$VALUES_FILE" 2>/dev/null || true
+          echo "  Extracted: $VALUES_FILE"
+        fi
+
+  render:
+    desc: "Render chart to Kubernetes manifests"
+    silent: true
+    vars:
+      CHART_NAME: '{{.CHART_NAME}}'
+      CHART_VERSION: '{{.CHART_VERSION}}'
+      APP_NAME: '{{.APP_NAME | default .CHART_NAME}}'
+    cmds:
+      - mkdir -p {{.OUTPUT_DIR}}
+      - |
+        CHART_FILE="{{.CHARTS_DIR}}/{{.CHART_NAME}}-{{.CHART_VERSION}}.tgz"
+        RENDERED="{{.OUTPUT_DIR}}/{{.APP_NAME}}-rendered.yaml"
+
+        if [ ! -f "$CHART_FILE" ]; then
+          echo "ERROR: $CHART_FILE not found"
+          exit 1
+        fi
+
+        echo "  Rendering: $CHART_FILE → $RENDERED"
+        helm template "{{.APP_NAME}}" "$CHART_FILE" \
+          --namespace "{{.APP_NAME}}-default" \
+          --include-crds \
+          2>/dev/null | \
+          yq eval-all 'select(. != null and .kind != null)' - > "$RENDERED"
+
+        DOC_COUNT=$(yq eval-all '[.] | length' "$RENDERED")
+        echo "  Rendered: $DOC_COUNT objects"
+
+  analyze:
+    desc: "Analyze rendered manifests using knowledge base"
+    silent: true
+    vars:
+      APP_NAME: '{{.APP_NAME}}'
+    preconditions:
+      - sh: command -v python3 >/dev/null
+        msg: "python3 is required"
+    cmds:
+      - python3 src/analyzer.py "{{.APP_NAME}}" --output-dir "{{.OUTPUT_DIR}}" --kb knowledge-base/fields.yaml
+
+  emit:
+    desc: "Generate golden-config, build preset, resource preset, evars from analysis"
+    silent: true
+    vars:
+      APP_NAME: '{{.APP_NAME}}'
+      CHART_REPO: '{{.CHART_REPO}}'
+      CHART_NAME: '{{.CHART_NAME}}'
+      CHART_VERSION: '{{.CHART_VERSION}}'
+      RELEASE: '{{.RELEASE | default .APP_NAME}}'
+    cmds:
+      - |
+        bash scripts/emit.sh \
+          "{{.APP_NAME}}" \
+          "{{.CHART_REPO}}" \
+          "{{.CHART_NAME}}" \
+          "{{.CHART_VERSION}}" \
+          "{{.OUTPUT_DIR}}" \
+          "{{.CHARTS_DIR}}" \
+          "{{.RELEASE}}"
+
+  emit-oci:
+    desc: "Generate OCI packaging layer (Dockerfile, sbom, Taskfile)"
+    silent: true
+    vars:
+      RELEASE: '{{.RELEASE | default .APP_NAME}}'
+      INPUT: '{{.INPUT | default .APP_NAME}}'
+    cmds:
+      - bash scripts/emit-oci.sh "{{.INPUT}}" "{{.RELEASE}}" "{{.OUTPUT_DIR}}"
+
+  validate:
+    desc: "Validate generated golden-config renders valid YAML via gomplate"
+    silent: true
+    vars:
+      APP_NAME: '{{.APP_NAME}}'
+    preconditions:
+      - sh: command -v gomplate >/dev/null
+        msg: "gomplate is required for validation"
+      - sh: command -v yq >/dev/null
+        msg: "yq is required for validation"
+    cmds:
+      - bash scripts/validate.sh "{{.APP_NAME}}" "{{.OUTPUT_DIR}}"
+
+  cue-vet:
+    desc: "Validate output consistency with CUE (evar/resource refs, quantity formats)"
+    silent: true
+    vars:
+      APP_NAME: '{{.APP_NAME}}'
+    preconditions:
+      - sh: command -v cue >/dev/null
+        msg: "cue is required (brew install cue-lang/tap/cue)"
+    cmds:
+      - bash scripts/cue-vet.sh "{{.APP_NAME}}" "{{.OUTPUT_DIR}}"
+
+  local-deploy-test:
+    desc: "End-to-end: render golden-config → helm install → verify in local cluster"
+    silent: true
+    vars:
+      APP_NAME: '{{.APP_NAME}}'
+      CHART_NAME: '{{.CHART_NAME | default .APP_NAME}}'
+      CHART_VERSION: '{{.CHART_VERSION | default ""}}'
+    preconditions:
+      - sh: command -v gomplate >/dev/null
+        msg: "gomplate is required"
+      - sh: command -v helm >/dev/null
+        msg: "helm is required"
+      - sh: command -v kubectl >/dev/null
+        msg: "kubectl is required"
+      - sh: kubectl cluster-info >/dev/null 2>&1
+        msg: "kubernetes cluster not reachable"
+    cmds:
+      - bash scripts/local-deploy-test.sh "{{.APP_NAME}}" "{{.CHART_NAME}}" "{{.CHART_VERSION}}" "{{.OUTPUT_DIR}}"
+
+  merge-outputs:
+    desc: "Merge per-app outputs into unified product files"
+    internal: true
+    silent: true
+    vars:
+      MANIFEST: '{{.MANIFEST}}'
+    cmds:
+      - |
+        PRODUCT=$(yq '.product' "{{.MANIFEST}}")
+        RELEASE=$(yq -r '.release // .product' "{{.MANIFEST}}")
+        echo ""
+        echo "=== Merging outputs for product: $PRODUCT (release: $RELEASE) ==="
+
+        MERGED_EVARS="{{.OUTPUT_DIR}}/evars.yaml"
+        MERGED_BUILD="{{.OUTPUT_DIR}}/presets/build/${RELEASE}.yaml"
+        MERGED_RESOURCE="{{.OUTPUT_DIR}}/presets/resource/$RELEASE/default.yaml"
+
+        # Ensure directories exist
+        mkdir -p "{{.OUTPUT_DIR}}/presets/build" "{{.OUTPUT_DIR}}/presets/resource/$RELEASE"
+
+        echo "# Merged environment schema for: $PRODUCT" > "$MERGED_EVARS"
+        echo "" >> "$MERGED_EVARS"
+
+        echo "# Merged build preset for: $PRODUCT ($RELEASE)" > "$MERGED_BUILD"
+        echo "" >> "$MERGED_BUILD"
+
+        echo "# Merged resource preset (default) for: $PRODUCT" > "$MERGED_RESOURCE"
+        echo "" >> "$MERGED_RESOURCE"
+
+        # Framework fields (written once at top of merged evars)
+        cat >> "$MERGED_EVARS" << EOF
+        # --- Framework ---
+        release: $RELEASE
+        resource_tier: default
+
+        EOF
+
+        CHARTS=$(yq -r '.charts | length' "{{.MANIFEST}}")
+        for cidx in $(seq 0 $((CHARTS - 1))); do
+          c_name=$(yq -r ".charts[$cidx].name" "{{.MANIFEST}}")
+          c_app=$(yq -r ".charts[$cidx].app_name // \"$c_name\"" "{{.MANIFEST}}")
+
+          APP_EVARS="{{.OUTPUT_DIR}}/evars-${c_app}.yaml"
+          if [ -f "$APP_EVARS" ]; then
+            echo "# === $c_app ===" >> "$MERGED_EVARS"
+            # Strip the per-app framework fields (release/resource_tier) — merged version has them once at top
+            grep -v "^release:" "$APP_EVARS" | grep -v "^resource_tier:" >> "$MERGED_EVARS"
+            echo "" >> "$MERGED_EVARS"
+          fi
+
+          APP_BUILD="{{.OUTPUT_DIR}}/presets/build/${c_app}-${RELEASE}.yaml"
+          if [ -f "$APP_BUILD" ]; then
+            echo "# === $c_app ===" >> "$MERGED_BUILD"
+            sed '/^# --- Orchestration tool versions/,$d' "$APP_BUILD" >> "$MERGED_BUILD"
+            echo "" >> "$MERGED_BUILD"
+            rm -f "$APP_BUILD"
+          fi
+
+          APP_RES="{{.OUTPUT_DIR}}/presets/resource/$RELEASE/${c_app}-default.yaml"
+          if [ -f "$APP_RES" ]; then
+            echo "# === $c_app ===" >> "$MERGED_RESOURCE"
+            cat "$APP_RES" >> "$MERGED_RESOURCE"
+            rm -f "$APP_RES"
+          fi
+        done
+
+        # Clean up per-app intermediate files
+        rm -f {{.OUTPUT_DIR}}/evars-*.yaml
+
+        echo "  Merged: evars, build preset, resource preset"
+
+  test:
+    desc: "Run full pipeline + validation on example charts (zero-input repeatable test)"
+    silent: true
+    preconditions:
+      - sh: command -v helm >/dev/null
+        msg: "helm is required"
+      - sh: command -v yq >/dev/null
+        msg: "yq is required"
+      - sh: command -v jq >/dev/null
+        msg: "jq is required"
+      - sh: command -v gomplate >/dev/null
+        msg: "gomplate is required"
+      - sh: command -v cue >/dev/null
+        msg: "cue is required (brew install cue-lang/tap/cue)"
+    cmds:
+      - |
+        echo "=== Running test suite ==="
+        echo ""
+        PASS=0
+        FAIL=0
+
+        # Test 1: podinfo (simple single Deployment)
+        echo "--- Test 1: podinfo (single Deployment) ---"
+        task generate \
+          CHART_REPO="https://stefanprodan.github.io/podinfo" \
+          CHART_NAME="podinfo" \
+          CHART_VERSION="6.7.1" \
+          APP_NAME="podinfo"
+        task validate APP_NAME="podinfo" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+        task cue-vet APP_NAME="podinfo" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+        echo ""
+
+        # Test 2: multi-chart manifest
+        echo "--- Test 2: multi-chart manifest ---"
+        if [ -f "examples/multi-chart.yaml" ]; then
+          task generate-multi MANIFEST="examples/multi-chart.yaml"
+          CHARTS=$(yq -r '.charts | length' "examples/multi-chart.yaml")
+          for cidx in $(seq 0 $((CHARTS - 1))); do
+            c_app=$(yq -r ".charts[$cidx].app_name // .charts[$cidx].name" "examples/multi-chart.yaml")
+            task validate APP_NAME="$c_app" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+            task cue-vet APP_NAME="$c_app" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+          done
+        else
+          echo "  SKIP: examples/multi-chart.yaml not found"
+        fi
+        echo ""
+
+        echo "=== Test Results: $PASS passed, $FAIL failed ==="
+        [ "$FAIL" -gt 0 ] && exit 1
+        exit 0
+
+  seed-registry:
+    desc: "Seed OKD internal registry with artifacts via port-forward"
+    silent: true
+    vars:
+      ENV: '{{.ENV | default "okd1"}}'
+    preconditions:
+      - sh: command -v crane >/dev/null
+        msg: "crane is required"
+      - sh: command -v skopeo >/dev/null
+        msg: "skopeo is required"
+      - sh: command -v kubectl >/dev/null
+        msg: "kubectl is required"
+      - sh: kubectl cluster-info >/dev/null 2>&1
+        msg: "kubernetes cluster not reachable"
+    cmds:
+      - bash scripts/seed-registry.sh "{{.ENV}}" "{{.OUTPUT_DIR}}"
+
+  apply:
+    desc: "Bootstrap deployer into a Kubernetes cluster (render base templates + kubectl apply)"
+    silent: true
+    vars:
+      ENV: '{{.ENV | default "local"}}'
+    preconditions:
+      - sh: command -v gomplate >/dev/null
+        msg: "gomplate is required"
+      - sh: command -v kubectl >/dev/null
+        msg: "kubectl is required"
+      - sh: command -v yq >/dev/null
+        msg: "yq is required"
+      - sh: kubectl cluster-info >/dev/null 2>&1
+        msg: "kubernetes cluster not reachable"
+    cmds:
+      - bash scripts/apply.sh "{{.ENV}}" "{{.OUTPUT_DIR}}"
+
+  generate-env:
+    desc: "Generate environment file from evars + framework fields"
+    silent: true
+    vars:
+      ENV: '{{.ENV | default "local"}}'
+      MANIFEST: '{{.MANIFEST | default ""}}'
+      RELEASE: '{{.RELEASE | default ""}}'
+      PLATFORM: '{{.PLATFORM | default "local"}}'
+      MODE: '{{.MODE | default "online"}}'
+      REGISTRY: '{{.REGISTRY | default "ghcr.io/rajeshmohangit/framework"}}'
+    preconditions:
+      - sh: test -f "{{.OUTPUT_DIR}}/evars.yaml"
+        msg: "evars.yaml not found — run generate or generate-multi first"
+    cmds:
+      - |
+        ENV_FILE="{{.OUTPUT_DIR}}/environments/{{.ENV}}.yaml"
+        mkdir -p "$(dirname "$ENV_FILE")"
+
+        RELEASE="{{.RELEASE}}"
+        if [ -z "$RELEASE" ] && [ -n "{{.MANIFEST}}" ] && [ -f "{{.MANIFEST}}" ]; then
+          RELEASE=$(yq -r '.release // .product' "{{.MANIFEST}}")
+        fi
+        if [ -z "$RELEASE" ]; then
+          RELEASE=$(grep "^release:" "{{.OUTPUT_DIR}}/evars.yaml" | awk '{print $2}' || echo "v1")
+        fi
+
+        cat > "$ENV_FILE" << EOF
+        # Environment: {{.ENV}}
+        # Generated from evars.yaml — merge app orchestration fields with framework config.
+
+        # --- Framework ---
+        env: {{.ENV}}
+        release: ${RELEASE}
+        resource_tier: default
+        platform: {{.PLATFORM}}
+        mode: {{.MODE}}
+        registry: {{.REGISTRY}}
+        registry_namespace: operator-registry
+
+        EOF
+
+        # Append app-specific evars (skip framework fields already written above)
+        # Resolve ${env} placeholders with the actual environment name
+        grep -v "^#\|^release:\|^resource_tier:\|^$" "{{.OUTPUT_DIR}}/evars.yaml" | \
+          sed "s/\${env}/{{.ENV}}/g" >> "$ENV_FILE" || true
+
+        # Also copy to the root environments/ dir for the apply task
+        cp "$ENV_FILE" "environments/{{.ENV}}.yaml"
+
+        echo "  Generated: $ENV_FILE"
+        echo "  Copied to: environments/{{.ENV}}.yaml"
+
+  publish-binaries:
+    desc: "Push sops/gomplate as OCI artifacts for fetch-binaries init container"
+    silent: true
+    vars:
+      REGISTRY: '{{.REGISTRY | default "ghcr.io/rajeshmohangit/framework"}}'
+    preconditions:
+      - sh: command -v oras >/dev/null || command -v crane >/dev/null
+        msg: "oras or crane is required"
+      - sh: test -f "{{.OUTPUT_DIR}}/oci/sbom.yaml"
+        msg: "oci/sbom.yaml not found — run emit-oci first"
+    cmds:
+      - bash scripts/publish-binaries.sh "{{.REGISTRY}}" "{{.OUTPUT_DIR}}"
+
+  clean:
+    desc: "Remove all generated outputs and cached charts"
+    silent: true
+    cmds:
+      - rm -rf {{.OUTPUT_DIR}} {{.CHARTS_DIR}}
+      - echo "Cleaned output/ and charts/"

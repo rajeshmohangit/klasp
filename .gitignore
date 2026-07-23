@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Generated outputs
+output/
+charts/
+!examples/charts/
+render/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+*.egg
+dist/
+build/
+
+# Local editor/venv
+.venv/
+venv/

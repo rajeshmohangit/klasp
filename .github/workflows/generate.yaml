@@ -1,0 +1,123 @@
+name: 'KLASP: Generate Artifacts'
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: 'Path to manifest YAML (e.g., examples/multi-chart.yaml)'
+        required: true
+        type: string
+        default: 'examples/multi-chart.yaml'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.0
+
+      - name: Install tools
+        # Pinned to the versions recorded in the SBOM manifest (scripts/emit-oci.sh).
+        env:
+          YQ_VERSION: v4.52.1
+          GOMPLATE_VERSION: v5.1.0
+          CUE_VERSION: v0.11.0
+        run: |
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+          sudo wget -qO /usr/local/bin/gomplate "https://github.com/hairyhenderson/gomplate/releases/download/${GOMPLATE_VERSION}/gomplate_linux-amd64"
+          sudo chmod +x /usr/local/bin/gomplate
+          wget -qO- "https://github.com/cue-lang/cue/releases/download/${CUE_VERSION}/cue_${CUE_VERSION}_linux_amd64.tar.gz" | sudo tar -xzf - -C /usr/local/bin cue
+
+      - name: Generate
+        run: |
+          MANIFEST="${{ inputs.manifest }}"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "ERROR: $MANIFEST not found in repository"
+            exit 1
+          fi
+          task generate-multi MANIFEST="$MANIFEST"
+
+      - name: Validate
+        run: |
+          MANIFEST="${{ inputs.manifest }}"
+          CHARTS=$(yq -r '.charts | length' "$MANIFEST")
+          for cidx in $(seq 0 $((CHARTS - 1))); do
+            c_app=$(yq -r ".charts[$cidx].app_name // .charts[$cidx].name" "$MANIFEST")
+            echo "--- Validating: $c_app ---"
+            task validate APP_NAME="$c_app"
+            task cue-vet APP_NAME="$c_app"
+          done
+
+      - name: Summary
+        run: |
+          MANIFEST="${{ inputs.manifest }}"
+          PRODUCT=$(yq '.product' "$MANIFEST")
+
+          echo "## Generated Outputs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Product:** $PRODUCT" >> $GITHUB_STEP_SUMMARY
+          echo "**Manifest:** $MANIFEST" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Charts processed" >> $GITHUB_STEP_SUMMARY
+          CHARTS=$(yq -r '.charts | length' "$MANIFEST")
+          for cidx in $(seq 0 $((CHARTS - 1))); do
+            c_name=$(yq -r ".charts[$cidx].name" "$MANIFEST")
+            c_version=$(yq -r ".charts[$cidx].version" "$MANIFEST")
+            c_app=$(yq -r ".charts[$cidx].app_name // .charts[$cidx].name" "$MANIFEST")
+            FIELDS=$(jq length "output/${c_app}-fields.json" 2>/dev/null || echo "?")
+            echo "- **$c_app** ($c_name:$c_version) → $FIELDS fields" >> $GITHUB_STEP_SUMMARY
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if ls output/*-unmatched.txt 1>/dev/null 2>&1; then
+            echo "### Unmatched fields (review needed)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat output/*-unmatched.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "### Output files" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          find output -type f \( -name "*.yaml" -o -name "*.tmpl" \) | sort >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Downloadable artifact" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All files above are packaged as the artifact **\`klasp-artifacts-${{ github.run_number }}\`**, listed under **Artifacts** at the bottom of this run's page (retained 30 days)." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download:** click the artifact below, or run" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "gh run download ${{ github.run_id }} -n klasp-artifacts-${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "(GitHub sign-in required.) The zip contains:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Path | Purpose |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`golden-configuration/<app>/values.yaml.tmpl\` | Gomplate templates rendering Helm values (\$b/\$r/\$e) |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`presets/build/<release>.yaml\` | Pinned image references + chart metadata (\$b) |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`presets/resource/<release>/default.yaml\` | CPU/memory/replicas per tier (\$r) |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`evars.yaml\` | Environment schema: endpoints, storage, sensitive placeholders (\$e) |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`oci/\` | Packaging layer: SBOM manifest + deployer Dockerfiles + pull/build Taskfile |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: klasp-artifacts-${{ github.run_number }}
+          path: |
+            output/golden-configuration/
+            output/presets/
+            output/evars.yaml
+            output/oci/
+          retention-days: 30
