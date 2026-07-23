@@ -9,7 +9,7 @@ set -euo pipefail
 # Requires: oras (or crane), curl
 #
 # Usage: ./scripts/publish-binaries.sh <registry> [output-dir]
-#   REGISTRY — e.g., ghcr.io/rajeshmohangit/framework
+#   REGISTRY — e.g., ghcr.io/rajeshmohangit/klasp
 #   OUTPUT_DIR — root containing oci/sbom.yaml
 
 REGISTRY="${1:?Usage: publish-binaries.sh <registry> [output-dir]}"

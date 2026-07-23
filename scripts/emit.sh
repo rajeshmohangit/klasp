@@ -258,7 +258,7 @@ echo "  Matched: $MATCHED fields → values.yaml paths"
 if [ "$FLAGGED" -gt 0 ]; then
   echo "  Flagged: $FLAGGED fields not found in values.yaml (see ${UNMATCHED_FILE})"
   echo ""
-  echo "  ⚠ Unmatched fields (synthesized by chart presets/helpers):"
+  echo "  WARN Unmatched fields (synthesized by chart presets/helpers):"
   cat "$UNMATCHED_FILE" | sed 's/^/    /'
   echo ""
 fi

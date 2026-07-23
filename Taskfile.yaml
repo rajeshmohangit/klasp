@@ -409,7 +409,7 @@ tasks:
       RELEASE: '{{.RELEASE | default ""}}'
       PLATFORM: '{{.PLATFORM | default "local"}}'
       MODE: '{{.MODE | default "online"}}'
-      REGISTRY: '{{.REGISTRY | default "ghcr.io/rajeshmohangit/framework"}}'
+      REGISTRY: '{{.REGISTRY | default "ghcr.io/rajeshmohangit/klasp"}}'
     preconditions:
       - sh: test -f "{{.OUTPUT_DIR}}/evars.yaml"
         msg: "evars.yaml not found — run generate or generate-multi first"
@@ -456,7 +456,7 @@ tasks:
     desc: "Push sops/gomplate as OCI artifacts for fetch-binaries init container"
     silent: true
     vars:
-      REGISTRY: '{{.REGISTRY | default "ghcr.io/rajeshmohangit/framework"}}'
+      REGISTRY: '{{.REGISTRY | default "ghcr.io/rajeshmohangit/klasp"}}'
     preconditions:
       - sh: command -v oras >/dev/null || command -v crane >/dev/null
         msg: "oras or crane is required"

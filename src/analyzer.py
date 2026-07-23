@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kubernetes manifest analyzer for the Framework YAML Generator.
+Kubernetes manifest analyzer for KLASP.
 
 Parses rendered multi-document K8s YAML, classifies fields based on
 the knowledge base (knowledge-base/fields.yaml), and outputs a

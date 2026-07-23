@@ -54,4 +54,4 @@ configmaps:
     data:
       index.html: |
         <!DOCTYPE html>
-        <html><body><h1>Demo App</h1><p>Deployed via framework generator</p></body></html>
+        <html><body><h1>Demo App</h1><p>Deployed via KLASP</p></body></html>
