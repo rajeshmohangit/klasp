@@ -1,0 +1,256 @@
+# Knowledge Base: Field classification for Kubernetes object types
+# Classification: dynamic (per-env), resource (scaling tier), sensitive (secrets), static (hardcoded)
+#
+# Rules are evaluated top-down per object kind against rendered manifests.
+# Each rule specifies a JSON path pattern and its classification.
+# The analyzer walks rendered objects, matches fields against these rules,
+# and emits the appropriate gomplate template references.
+
+Deployment:
+  dynamic:
+    - path: spec.replicas
+      evar_suffix: replicas
+      type: integer
+      default_from_rendered: true
+
+    - path: spec.template.spec.containers[*].image
+      evar_suffix: image
+      type: image
+      split: true  # split into _image_registry, _image_repository, _image_tag
+
+    - path: spec.template.spec.nodeSelector
+      evar_suffix: null
+      type: node_selector
+      framework: true  # uses framework $e.env pattern
+
+    - path: spec.template.spec.initContainers[*].image
+      evar_suffix: init_image
+      type: image
+      split: true
+
+  resource:
+    - path: spec.template.spec.containers[*].resources.requests.cpu
+      evar_suffix: requests_cpu
+    - path: spec.template.spec.containers[*].resources.requests.memory
+      evar_suffix: requests_memory
+    - path: spec.template.spec.containers[*].resources.limits.cpu
+      evar_suffix: limits_cpu
+    - path: spec.template.spec.containers[*].resources.limits.memory
+      evar_suffix: limits_memory
+    - path: spec.template.spec.initContainers[*].resources.requests.cpu
+      evar_suffix: init_requests_cpu
+    - path: spec.template.spec.initContainers[*].resources.requests.memory
+      evar_suffix: init_requests_memory
+    - path: spec.template.spec.initContainers[*].resources.limits.cpu
+      evar_suffix: init_limits_cpu
+    - path: spec.template.spec.initContainers[*].resources.limits.memory
+      evar_suffix: init_limits_memory
+
+  sensitive:
+    - path: spec.template.spec.containers[*].env[*]
+      match_name: "PASSWORD|SECRET|TOKEN|KEY|CREDENTIAL|COOKIE|PRIVATE"
+      evar_suffix: from_name
+      type: sensitive_env
+
+  static:
+    - spec.selector
+    - spec.strategy
+    - spec.template.spec.containers[*].ports
+    - spec.template.spec.containers[*].livenessProbe
+    - spec.template.spec.containers[*].readinessProbe
+    - spec.template.spec.containers[*].startupProbe
+    - spec.template.spec.containers[*].securityContext
+    - spec.template.spec.containers[*].volumeMounts
+    - spec.template.spec.containers[*].command
+    - spec.template.spec.containers[*].args
+    - spec.template.spec.podSecurityContext
+    - spec.template.spec.serviceAccountName
+    - spec.template.spec.volumes
+    - spec.template.metadata.labels
+    - spec.template.metadata.annotations
+    - spec.revisionHistoryLimit
+
+StatefulSet:
+  dynamic:
+    - path: spec.replicas
+      evar_suffix: replicas
+      type: integer
+      default_from_rendered: true
+
+    - path: spec.template.spec.containers[*].image
+      evar_suffix: image
+      type: image
+      split: true
+
+    - path: spec.template.spec.nodeSelector
+      evar_suffix: null
+      type: node_selector
+      framework: true
+
+    - path: spec.volumeClaimTemplates[*].spec.storageClassName
+      evar_suffix: storage_class
+      type: string
+      platform_default: true  # uses platform-specific default
+
+    - path: spec.volumeClaimTemplates[*].spec.resources.requests.storage
+      evar_suffix: storage_size
+      type: string
+      default_from_rendered: true
+
+  resource:
+    - path: spec.template.spec.containers[*].resources.requests.cpu
+      evar_suffix: requests_cpu
+    - path: spec.template.spec.containers[*].resources.requests.memory
+      evar_suffix: requests_memory
+    - path: spec.template.spec.containers[*].resources.limits.cpu
+      evar_suffix: limits_cpu
+    - path: spec.template.spec.containers[*].resources.limits.memory
+      evar_suffix: limits_memory
+
+  sensitive:
+    - path: spec.template.spec.containers[*].env[*]
+      match_name: "PASSWORD|SECRET|TOKEN|KEY|CREDENTIAL|COOKIE|PRIVATE"
+      evar_suffix: from_name
+      type: sensitive_env
+
+  static:
+    - spec.selector
+    - spec.serviceName
+    - spec.updateStrategy
+    - spec.podManagementPolicy
+    - spec.template.spec.containers[*].ports
+    - spec.template.spec.containers[*].livenessProbe
+    - spec.template.spec.containers[*].readinessProbe
+    - spec.template.spec.containers[*].securityContext
+    - spec.template.spec.containers[*].volumeMounts
+    - spec.template.spec.volumes
+    - spec.template.metadata.labels
+
+Service:
+  dynamic:
+    - path: spec.type
+      evar_suffix: service_type
+      type: string
+      condition: "NodePort|LoadBalancer"  # only dynamic if not ClusterIP
+
+    - path: spec.ports[*].nodePort
+      evar_suffix: node_port
+      type: integer
+      condition: "spec.type=NodePort"
+
+  static:
+    - spec.ports[*].port
+    - spec.ports[*].targetPort
+    - spec.ports[*].protocol
+    - spec.selector
+    - spec.clusterIP
+
+Secret:
+  sensitive:
+    - path: data.*
+      evar_suffix: from_key
+      type: sensitive
+    - path: stringData.*
+      evar_suffix: from_key
+      type: sensitive
+
+  static:
+    - type
+
+ConfigMap:
+  dynamic:
+    - path: data.*
+      evar_suffix: from_key
+      type: config_value
+      heuristic: true  # only if value looks like URL/host/credential
+
+  static:
+    - metadata.labels
+    - metadata.annotations
+
+ServiceAccount:
+  static:
+    - metadata
+    - automountServiceAccountToken
+    - imagePullSecrets
+
+ClusterRole:
+  static:
+    - rules
+
+ClusterRoleBinding:
+  static:
+    - roleRef
+    - subjects
+
+Role:
+  static:
+    - rules
+
+RoleBinding:
+  static:
+    - roleRef
+    - subjects
+
+Ingress:
+  dynamic:
+    - path: spec.rules[*].host
+      evar_suffix: ingress_host
+      type: string
+    - path: spec.tls[*].hosts[*]
+      evar_suffix: ingress_tls_host
+      type: string
+    - path: spec.tls[*].secretName
+      evar_suffix: ingress_tls_secret
+      type: string
+    - path: metadata.annotations.kubernetes.io/ingress.class
+      evar_suffix: ingress_class
+      type: string
+
+  static:
+    - spec.rules[*].http.paths
+
+HorizontalPodAutoscaler:
+  dynamic:
+    - path: spec.minReplicas
+      evar_suffix: hpa_min_replicas
+      type: integer
+    - path: spec.maxReplicas
+      evar_suffix: hpa_max_replicas
+      type: integer
+
+  static:
+    - spec.metrics
+    - spec.behavior
+
+PersistentVolumeClaim:
+  dynamic:
+    - path: spec.storageClassName
+      evar_suffix: storage_class
+      type: string
+      platform_default: true
+    - path: spec.resources.requests.storage
+      evar_suffix: storage_size
+      type: string
+
+  static:
+    - spec.accessModes
+
+# Env var classification heuristics for container env vars
+# Applied when a container env var doesn't match the sensitive pattern above
+env_heuristics:
+  dynamic:
+    - match_value: "https?://.*\\."  # URL with domain
+      reason: "external endpoint"
+    - match_name: "HOST$|HOSTNAME$|DOMAIN$|URL$|ENDPOINT$|ADDR$|ADDRESS$"
+      reason: "endpoint reference"
+
+  static:
+    - match_value: "^[0-9]+$"  # pure numbers (ports, timeouts)
+      reason: "numeric constant"
+    - match_value: "^(true|false)$"
+      reason: "boolean flag"
+    - match_value: "^[a-z]+-[a-z]+:[0-9]+$"  # service:port within cluster
+      reason: "intra-cluster service reference"
+    - match_name: "^(PORT|LOG_LEVEL|LOG_FORMAT|JAVA_OPTS|JVM_|GC_|GOMAXPROCS)$"
+      reason: "runtime config constant"
