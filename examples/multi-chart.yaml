@@ -1,0 +1,17 @@
+# Multi-chart manifest: demonstrates generating unified outputs for a product
+# composed of multiple Helm charts.
+# Usage: task generate-multi MANIFEST=examples/multi-chart.yaml
+
+product: messaging-platform
+release: v1
+
+charts:
+  - repo: https://stefanprodan.github.io/podinfo
+    name: podinfo
+    version: "6.7.1"
+    app_name: podinfo
+
+  - repo: https://hazelcast-charts.s3.amazonaws.com
+    name: hazelcast
+    version: "5.10.0"
+    app_name: hazelcast

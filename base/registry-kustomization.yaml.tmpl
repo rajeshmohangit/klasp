@@ -1,0 +1,43 @@
+{{- $e := datasource "env" -}}
+{{- $registry_ns := index $e "registry_namespace" | default "operator-registry" -}}
+{{- $seen := coll.Dict -}}
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: {{ $registry_ns }}
+
+configMapGenerator:
+  - name: preset-{{ $e.release }}-build
+    files:
+      - build.yaml=presets/build/{{ $e.release }}.yaml
+    options:
+      disableNameSuffixHash: true
+  - name: preset-{{ $e.release }}-resource-{{ $e.resource_tier }}
+    files:
+      - resource.yaml=presets/resource/{{ $e.release }}/{{ $e.resource_tier }}.yaml
+    options:
+      disableNameSuffixHash: true
+{{- range $k, $v := $e }}
+{{- if and (strings.HasSuffix "_orchestration_mode" $k) (ne $v "") }}
+{{- $app_key := strings.TrimSuffix "_orchestration_mode" $k }}
+{{- $app_name := $app_key | strings.ReplaceAll "_" "-" }}
+{{- $app_type := index $e (printf "%s_orchestration_application_type" $app_key) | default "" }}
+{{- if or (eq $v "reconcile") (eq $v "disabled") }}
+{{- $golden_name := index $e (printf "%s_orchestration_golden_config" $app_key) | default $app_name }}
+{{- if not (has $seen $golden_name) }}
+{{- $_ := coll.Set $golden_name true $seen }}
+{{- $golden_dir := printf "golden-configuration/%s" $golden_name }}
+{{- $golden_files := file.Walk $golden_dir }}
+  - name: goldenconfig-{{ $e.release }}-{{ $golden_name }}
+    files:
+{{- range $golden_files }}
+{{- if or (strings.HasSuffix ".tmpl" .) (strings.HasSuffix ".yaml" .) }}
+      - {{ filepath.Base . }}={{ . }}
+{{- end }}
+{{- end }}
+    options:
+      disableNameSuffixHash: true
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

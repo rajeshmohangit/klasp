@@ -1,0 +1,16 @@
+{{- $e := datasource "env" -}}
+{{- $orchestration_ns := printf "orchestration-%s" $e.env -}}
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: {{ $orchestration_ns }}
+
+resources:
+  - helm-cronjob.yaml
+
+configMapGenerator:
+  - name: evars-{{ $e.env }}
+    files:
+      - env.yaml=environments/{{ $e.env }}.yaml
+    options:
+      disableNameSuffixHash: true

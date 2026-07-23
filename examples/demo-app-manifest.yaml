@@ -1,0 +1,11 @@
+product: demo-platform
+release: v1
+charts:
+  - repo: examples/charts/base-chart
+    name: base-chart
+    version: "0.2.0"
+    app_name: demo-app
+  - repo: https://stefanprodan.github.io/podinfo
+    name: podinfo
+    version: "6.7.1"
+    app_name: podinfo

@@ -1,0 +1,120 @@
+{{- define "base-chart.deployment" -}}
+{{- if .Values.deployments }}
+{{- range .Values.deployments }}
+{{- if .enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ required "Deployment name is required" .name }}
+  namespace: {{ .namespace | default $.Release.Namespace }}
+  labels:
+    {{- include "base-chart.labels" $ | nindent 4 }}
+    {{- with .labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- if or $.Values.commonAnnotations .annotations }}
+  annotations:
+    {{- include "base-chart.annotations" $ | nindent 4 }}
+    {{- with .annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- if not .autoscaling }}
+  replicas: {{ .replicaCount | default 1 }}
+  {{- end }}
+  {{- with .strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .revisionHistoryLimit }}
+  revisionHistoryLimit: {{ . }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- if .selectorLabels }}
+      {{- toYaml .selectorLabels | nindent 6 }}
+      {{- else }}
+      {{- include "base-chart.selectorLabels" $ | nindent 6 }}
+      {{- end }}
+  template:
+    metadata:
+      {{- with .podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "base-chart.labels" $ | nindent 8 }}
+        {{- if .selectorLabels }}
+        {{- toYaml .selectorLabels | nindent 8 }}
+        {{- end }}
+        {{- with .podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .serviceAccountName }}
+      serviceAccountName: {{ .serviceAccountName }}
+      {{- else }}
+      serviceAccountName: {{ include "base-chart.serviceAccountName" $ }}
+      {{- end }}
+      {{- with .podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .automountServiceAccountToken }}
+      automountServiceAccountToken: {{ . }}
+      {{- end }}
+      {{- with .dnsPolicy }}
+      dnsPolicy: {{ . }}
+      {{- end }}
+      {{- with .enableServiceLinks }}
+      enableServiceLinks: {{ . }}
+      {{- end }}
+      {{- with .restartPolicy }}
+      restartPolicy: {{ . }}
+      {{- end }}
+      {{- with .shareProcessNamespace }}
+      shareProcessNamespace: {{ . }}
+      {{- end }}
+      {{- with .terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
+      {{- with .initContainers }}
+      initContainers:
+        {{- range . }}
+        {{- include "base-chart.container" . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      containers:
+        {{- range .containers }}
+        {{- include "base-chart.container" . | nindent 8 }}
+        {{- end }}
+      {{- with .volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

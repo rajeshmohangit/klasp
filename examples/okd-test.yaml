@@ -1,0 +1,31 @@
+product: okd-test
+release: v1
+charts:
+  - repo: examples/charts/base-chart
+    name: base-chart
+    version: "0.2.0"
+    app_name: demo-app
+  - repo: https://stefanprodan.github.io/podinfo
+    name: podinfo
+    version: "6.7.1"
+    app_name: podinfo
+  - repo: https://hazelcast-charts.s3.amazonaws.com
+    name: hazelcast
+    version: "5.10.0"
+    app_name: hazelcast
+  - repo: https://prometheus-community.github.io/helm-charts
+    name: prometheus
+    version: "29.17.0"
+    app_name: prometheus
+  - repo: https://grafana.github.io/helm-charts
+    name: grafana
+    version: "12.7.2"
+    app_name: grafana
+  - repo: https://kubernetes.github.io/ingress-nginx
+    name: ingress-nginx
+    version: "4.15.1"
+    app_name: ingress-nginx
+  - repo: https://charts.jetstack.io
+    name: cert-manager
+    version: "v1.21.0"
+    app_name: cert-manager

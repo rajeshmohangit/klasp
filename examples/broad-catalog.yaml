@@ -1,0 +1,23 @@
+product: broad-catalog
+release: v1
+charts:
+  - repo: https://prometheus-community.github.io/helm-charts
+    name: prometheus
+    version: "29.17.0"
+    app_name: prometheus
+  - repo: https://grafana.github.io/helm-charts
+    name: grafana
+    version: "12.7.2"
+    app_name: grafana
+  - repo: https://helm.releases.hashicorp.com
+    name: vault
+    version: "0.34.0"
+    app_name: vault
+  - repo: https://kubernetes.github.io/ingress-nginx
+    name: ingress-nginx
+    version: "4.15.1"
+    app_name: ingress-nginx
+  - repo: https://charts.jetstack.io
+    name: cert-manager
+    version: "v1.21.0"
+    app_name: cert-manager

@@ -1,0 +1,307 @@
+{{- $e := datasource "env" -}}
+{{- $b := datasource "build" -}}
+{{- $orchestration_ns := printf "orchestration-%s" $e.env -}}
+{{- $registry_ns := index $e "registry_namespace" | default "operator-registry" -}}
+{{- $registry := index $e "registry" | default "ghcr.io" -}}
+{{- $platform := index $e "platform" | default "local" -}}
+{{- $mode := index $e "mode" | default "online" -}}
+{{- $helm_image := "cgr.dev/chainguard/helm:latest-dev" -}}
+{{- $crane_image := "cgr.dev/chainguard/crane:latest-dev" -}}
+{{- if eq $mode "airgap" }}{{- $helm_image = printf "%s/%s/images-helm:latest-dev" $registry $registry_ns -}}{{- $crane_image = printf "%s/%s/images-crane:latest-dev" $registry $registry_ns -}}{{- end -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helm-deployer-{{ $e.env }}
+  namespace: {{ $orchestration_ns }}
+{{- if eq $platform "gke" }}
+  annotations:
+    iam.gke.io/gcp-service-account: {{ index $e "gke_service_account" | default "" }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: helm-deployer-{{ $e.env }}
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: helm-deployer-{{ $e.env }}
+subjects:
+  - kind: ServiceAccount
+    name: helm-deployer-{{ $e.env }}
+    namespace: {{ $orchestration_ns }}
+roleRef:
+  kind: ClusterRole
+  name: helm-deployer-{{ $e.env }}
+  apiGroup: rbac.authorization.k8s.io
+{{- range $k, $v := $e }}
+{{- if strings.HasSuffix "_orchestration_mode" $k }}
+{{- $app_key := strings.TrimSuffix "_orchestration_mode" $k }}
+{{- $app_name := $app_key | strings.ReplaceAll "_" "-" }}
+{{- $app_type := index $e (printf "%s_orchestration_application_type" $app_key) | default "" }}
+{{- if and (or (eq $app_type "helm") (eq $app_type "manifest") (eq $app_type "")) (or (eq $v "reconcile") (eq $v "disabled")) }}
+{{- $schedule := index $e (printf "%s_orchestration_frequency" $app_key) }}
+{{- $namespace := index $e (printf "%s_orchestration_namespace" $app_key) }}
+{{- $chart := index $b (printf "%s_helm_chart" $app_key) | default (index $e (printf "%s_helm_chart" $app_key) | default "") }}
+{{- $extra_args := index $e (printf "%s_helm_extra_args" $app_key) | default "" }}
+{{- $chart_repo := index $b (printf "%s_helm_chart_repo" $app_key) | default (index $e (printf "%s_helm_chart_repo" $app_key) | default "") }}
+{{- $chart_version := index $b (printf "%s_helm_chart_version" $app_key) | default "" }}
+{{- $golden_name := index $e (printf "%s_orchestration_golden_config" $app_key) | default $app_name }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $app_name }}-deployer
+  namespace: {{ $orchestration_ns }}
+spec:
+  schedule: "{{ $schedule }}"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          serviceAccountName: helm-deployer-{{ $e.env }}
+          restartPolicy: Never
+{{- if has $e "node_selector_key" }}
+          nodeSelector:
+            {{ index $e "node_selector_key" }}: {{ $e.env }}
+          tolerations:
+            - key: {{ index $e "node_selector_key" }}
+              operator: Equal
+              value: {{ $e.env }}
+              effect: NoSchedule
+{{- end }}
+          initContainers:
+            - name: fetch-binaries
+{{- if eq $mode "online" }}
+              image: {{ $helm_image }}
+{{- else }}
+              image: {{ $crane_image }}
+{{- end }}
+              env:
+                - name: HOME
+                  value: /tmp
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+{{- if eq $mode "online" }}
+                  wget -qO /tools/gomplate "https://github.com/hairyhenderson/gomplate/releases/download/{{ $b.gomplate_tag }}/gomplate_linux-amd64"
+                  wget -qO /tools/sops "https://github.com/getsops/sops/releases/download/{{ $b.sops_tag }}/sops-{{ $b.sops_tag }}.linux.amd64"
+                  chmod +x /tools/gomplate /tools/sops
+{{- else }}
+                  REGISTRY="{{ $registry }}"
+                  REGISTRY_NS="{{ $registry_ns }}"
+                  USERNAME=$(cat /registry-token/username)
+                  TOKEN=$(cat /registry-token/token)
+{{- if eq $platform "gke" }}
+                  AUTH_HOST=$(echo "$REGISTRY" | cut -d'/' -f1)
+                  crane auth login $AUTH_HOST --username "$USERNAME" --password "$TOKEN"
+{{- else }}
+                  crane auth login $REGISTRY --username "$USERNAME" --password "$TOKEN" --insecure
+{{- end }}
+
+                  SOPS_DIGEST=$(crane manifest $REGISTRY/$REGISTRY_NS/binaries-sops:{{ $b.sops_tag }}{{ if ne $platform "gke" }} --insecure{{ end }} | grep -o '"sha256:[^"]*' | tail -1 | tr -d '"')
+                  crane blob $REGISTRY/$REGISTRY_NS/binaries-sops@$SOPS_DIGEST{{ if ne $platform "gke" }} --insecure{{ end }} > /tools/sops.tar.gz
+                  tar -xzf /tools/sops.tar.gz -C /tools 2>/dev/null || mv /tools/sops.tar.gz /tools/sops
+                  rm -f /tools/sops.tar.gz
+
+                  GOMP_DIGEST=$(crane manifest $REGISTRY/$REGISTRY_NS/binaries-gomplate:{{ $b.gomplate_tag }}{{ if ne $platform "gke" }} --insecure{{ end }} | grep -o '"sha256:[^"]*' | tail -1 | tr -d '"')
+                  crane blob $REGISTRY/$REGISTRY_NS/binaries-gomplate@$GOMP_DIGEST{{ if ne $platform "gke" }} --insecure{{ end }} > /tools/gomplate.tar.gz
+                  tar -xzf /tools/gomplate.tar.gz -C /tools 2>/dev/null || mv /tools/gomplate.tar.gz /tools/gomplate
+                  rm -f /tools/gomplate.tar.gz
+
+                  chmod +x /tools/sops /tools/gomplate
+                  echo -n "$TOKEN" > /tools/registry-token
+{{- end }}
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+{{- if eq $mode "airgap" }}
+                - name: registry-token
+                  mountPath: /registry-token
+                  readOnly: true
+{{- end }}
+          containers:
+            - name: deploy
+              image: {{ $helm_image }}
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: APP_NAME
+                  value: "{{ $app_name }}"
+                - name: ENV
+                  value: "{{ $e.env }}"
+                - name: NAMESPACE
+                  value: "{{ $namespace }}"
+                - name: ORCHESTRATION_NS
+                  value: "{{ $orchestration_ns }}"
+                - name: HELM_CHART
+                  value: "{{ $chart }}"
+{{- $helm_release := index $e (printf "%s_helm_release" $app_key) | default "" }}
+{{- if ne $helm_release "" }}
+                - name: HELM_RELEASE
+                  value: "{{ $helm_release }}"
+{{- end }}
+{{- if ne $chart_version "" }}
+                - name: HELM_CHART_VERSION
+                  value: "{{ $chart_version }}"
+{{- end }}
+{{- if ne $extra_args "" }}
+                - name: HELM_EXTRA_ARGS
+                  value: "{{ $extra_args }}"
+{{- end }}
+{{- if ne $chart_repo "" }}
+                - name: HELM_CHART_REPO
+                  value: "{{ $chart_repo }}"
+{{- end }}
+                - name: GOLDEN_CONFIG_NAME
+                  value: "{{ $golden_name }}"
+                - name: REGISTRY_NS
+                  value: "{{ $registry_ns }}"
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  export PATH="/tools:${PATH}"
+
+                  RELEASE_NAME="${HELM_RELEASE:-${APP_NAME}-${ENV}}"
+
+                  kubectl get configmap evars-${ENV} -n ${ORCHESTRATION_NS} -o jsonpath='{.data.env\.yaml}' > /tmp/env.yaml
+
+                  MODE=$(grep "^${APP_NAME//-/_}_orchestration_mode:" /tmp/env.yaml | awk '{print $2}')
+
+                  if [ "$MODE" = "disabled" ]; then
+                    if helm status ${RELEASE_NAME} --namespace $NAMESPACE > /dev/null 2>&1; then
+                      echo "release '${RELEASE_NAME}' found, uninstalling..."
+                      helm uninstall ${RELEASE_NAME} --namespace $NAMESPACE --wait
+                    else
+                      echo "release '${RELEASE_NAME}' not found, nothing to do"
+                    fi
+                    exit 0
+                  fi
+
+                  RELEASE=$(grep "^release:" /tmp/env.yaml | awk '{print $2}')
+                  RESOURCE_TIER=$(grep "^resource_tier:" /tmp/env.yaml | awk '{print $2}')
+
+                  kubectl get configmap "preset-${RELEASE}-build" -n ${REGISTRY_NS} \
+                    -o jsonpath='{.data.build\.yaml}' > /tmp/build.yaml
+                  kubectl get configmap "preset-${RELEASE}-resource-${RESOURCE_TIER}" -n ${REGISTRY_NS} \
+                    -o jsonpath='{.data.resource\.yaml}' > /tmp/resource.yaml
+
+                  CONFIGMAP="goldenconfig-${RELEASE}-${GOLDEN_CONFIG_NAME}"
+                  KEYS=$(kubectl get configmap "$CONFIGMAP" -n ${REGISTRY_NS} -o go-template='{{ "{{" }}range $k,$v := .data{{ "}}" }}{{ "{{" }}$k{{ "}}" }}{{ "{{" }}"\n"{{ "}}" }}{{ "{{" }}end{{ "}}" }}' | sort)
+
+                  kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+
+                  # Apply CRDs (no rendering, applied as-is)
+                  CRD_KEYS=$(echo "$KEYS" | grep '^crd-.*\.yaml$' || true)
+                  for key in $CRD_KEYS; do
+                    escaped_key=$(echo "$key" | sed 's/\./\\./g')
+                    echo "applying CRD $key..."
+                    kubectl get configmap "$CONFIGMAP" -n ${REGISTRY_NS} -o jsonpath="{.data.${escaped_key}}" | kubectl apply -f - --server-side
+                  done
+
+                  # Apply manifests
+                  MANIFEST_KEYS=$(echo "$KEYS" | grep 'manifest.*\.yaml\.tmpl$' || true)
+                  for key in $MANIFEST_KEYS; do
+                    escaped_key=$(echo "$key" | sed 's/\./\\./g')
+                    echo "rendering $key..."
+                    kubectl get configmap "$CONFIGMAP" -n ${REGISTRY_NS} -o jsonpath="{.data.${escaped_key}}" > /tmp/template.yaml.tmpl
+
+                    gomplate \
+                      -d build=/tmp/build.yaml \
+                      -d resource=/tmp/resource.yaml \
+                      -d env=/tmp/env.yaml \
+                      -f /tmp/template.yaml.tmpl \
+                      -o /tmp/rendered.yaml
+
+                    if [ -s /tmp/rendered.yaml ]; then
+                      echo "applying $key..."
+                      kubectl apply -f /tmp/rendered.yaml
+                    else
+                      echo "skipping $key (empty render)"
+                    fi
+                  done
+
+                  # Deploy helm chart
+                  VALUES_KEY=$(echo "$KEYS" | grep 'values\.yaml\.tmpl$' | head -1)
+                  if [ -n "$VALUES_KEY" ]; then
+                    escaped_key=$(echo "$VALUES_KEY" | sed 's/\./\\./g')
+                    echo "rendering $VALUES_KEY..."
+                    kubectl get configmap "$CONFIGMAP" -n ${REGISTRY_NS} -o jsonpath="{.data.${escaped_key}}" > /tmp/values.yaml.tmpl
+
+                    gomplate \
+                      -d build=/tmp/build.yaml \
+                      -d resource=/tmp/resource.yaml \
+                      -d env=/tmp/env.yaml \
+                      -f /tmp/values.yaml.tmpl \
+                      -o /tmp/values.yaml
+
+                    if [ -n "${HELM_CHART_REPO:-}" ]; then
+                      case "${HELM_CHART_REPO}" in
+                        oci://*)
+                          CHART_REF="${HELM_CHART_REPO}/${HELM_CHART}"
+{{- if eq $mode "airgap" }}
+                          REGISTRY_HOST=$(echo "{{ $registry }}" | cut -d'/' -f1)
+                          cat /tools/registry-token | helm registry login ${REGISTRY_HOST} --username "$USERNAME" --password-stdin{{ if ne $platform "gke" }} --insecure{{ end }}
+{{- end }}
+                          ;;
+                        local)
+                          kubectl get configmap "localchart-${APP_NAME}" -n ${REGISTRY_NS} \
+                            -o go-template='{{ "{{" }}index .binaryData "chart.tgz"{{ "}}" }}' | base64 -d > /tmp/chart.tgz
+                          CHART_REF="/tmp/chart.tgz"
+                          ;;
+                        *)
+                          helm repo add app-repo "${HELM_CHART_REPO}" --force-update
+                          CHART_REF="app-repo/${HELM_CHART}"
+                          ;;
+                      esac
+                    else
+{{- if eq $mode "online" }}
+                      helm repo add app-repo "https://charts.example.com" --force-update 2>/dev/null || true
+                      CHART_REF="app-repo/${HELM_CHART}"
+{{- else }}
+                      REGISTRY_HOST=$(echo "{{ $registry }}" | cut -d'/' -f1)
+                      cat /tools/registry-token | helm registry login ${REGISTRY_HOST} --username "$USERNAME" --password-stdin --insecure
+                      CHART_REF="oci://{{ $registry }}/{{ $registry_ns }}/charts-${HELM_CHART}"
+{{- end }}
+                    fi
+
+                    helm upgrade --install ${RELEASE_NAME} \
+                      ${CHART_REF}${HELM_CHART_VERSION:+ --version $HELM_CHART_VERSION} \
+                      --namespace $NAMESPACE --create-namespace \
+                      --values /tmp/values.yaml \
+                      ${HELM_EXTRA_ARGS:-} \
+                      --wait
+                  fi
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+{{- if eq $mode "airgap" }}
+                - name: registry-token
+                  mountPath: /registry-token
+                  readOnly: true
+{{- end }}
+          volumes:
+            - name: tools
+              emptyDir: {}
+{{- if eq $mode "airgap" }}
+            - name: registry-token
+              secret:
+                secretName: registry-token
+                defaultMode: 420
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

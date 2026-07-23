@@ -1,0 +1,34 @@
+{{- define "base-chart.configmap" -}}
+{{- if .Values.configmaps }}
+{{- range .Values.configmaps }}
+{{- if .enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ required "ConfigMap name is required" .name }}
+  namespace: {{ .namespace | default $.Release.Namespace }}
+  labels:
+    {{- include "base-chart.labels" $ | nindent 4 }}
+    {{- with .labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- if or $.Values.commonAnnotations .annotations }}
+  annotations:
+    {{- include "base-chart.annotations" $ | nindent 4 }}
+    {{- with .annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+{{- with .data }}
+data:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .binaryData }}
+binaryData:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

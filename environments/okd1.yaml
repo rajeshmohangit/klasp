@@ -1,0 +1,52 @@
+# Environment: okd1
+# Generated from evars.yaml — merge app orchestration fields with framework config.
+
+# --- Framework ---
+env: okd1
+release: v1
+resource_tier: default
+platform: openshift
+mode: online
+registry: ghcr.io/rajeshmohangit/klasp
+registry_namespace: operator-registry
+
+demo_app_orchestration_mode: reconcile
+demo_app_orchestration_namespace: demo-app-okd1
+demo_app_orchestration_frequency: "*/2 * * * *"
+demo_app_orchestration_application_type: helm
+podinfo_orchestration_mode: reconcile
+podinfo_orchestration_namespace: podinfo-okd1
+podinfo_orchestration_frequency: "*/2 * * * *"
+podinfo_orchestration_application_type: helm
+hazelcast_orchestration_mode: reconcile
+hazelcast_orchestration_namespace: hazelcast-okd1
+hazelcast_orchestration_frequency: "*/2 * * * *"
+hazelcast_orchestration_application_type: helm
+hazelcast_mancenter_storage_storage_size: 8Gi
+hazelcast_service_type: ClusterIP
+prometheus_orchestration_mode: reconcile
+prometheus_orchestration_namespace: prometheus-okd1
+prometheus_orchestration_frequency: "*/2 * * * *"
+prometheus_orchestration_application_type: helm
+prometheus_storage_size: 8Gi
+prometheus_storage_storage_size: 2Gi
+prometheus_helm_extra_args: "--set prometheus-node-exporter.enabled=false --set server.persistentVolume.enabled=false --set alertmanager.persistence.enabled=false"
+grafana_orchestration_mode: reconcile
+grafana_orchestration_namespace: grafana-okd1
+grafana_orchestration_frequency: "*/2 * * * *"
+grafana_orchestration_application_type: helm
+grafana_admin_password_gen_sensitive: ""  # auto-generated
+grafana_admin_user_gen_sensitive: ""  # auto-generated
+grafana_gf_security_admin_password_gen_sensitive: ""  # auto-generated
+grafana_ldap_toml_gen_sensitive: ""  # auto-generated
+ingress_nginx_orchestration_mode: reconcile
+ingress_nginx_orchestration_namespace: ingress-nginx-okd1
+ingress_nginx_orchestration_frequency: "*/2 * * * *"
+ingress_nginx_orchestration_application_type: helm
+ingress_nginx_service_type: ClusterIP
+ingress_nginx_helm_extra_args: "--set controller.admissionWebhooks.enabled=false --set controller.image.runAsNonRoot=true --set controller.image.runAsUser=null --set controller.containerSecurityContext.runAsUser=null"
+cert_manager_orchestration_mode: reconcile
+cert_manager_orchestration_namespace: cert-manager-okd1
+cert_manager_orchestration_frequency: "*/2 * * * *"
+cert_manager_orchestration_application_type: helm
+cert_manager_helm_extra_args: "--set crds.enabled=true"

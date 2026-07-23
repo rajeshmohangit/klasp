@@ -1,0 +1,22 @@
+# Environment: local
+# Generated from evars.yaml — merge app orchestration fields with framework config.
+
+# --- Framework ---
+env: local
+release: v1
+resource_tier: default
+platform: local
+mode: online
+registry: ghcr.io/rajeshmohangit/klasp
+registry_namespace: operator-registry
+
+podinfo_orchestration_mode: disabled
+podinfo_orchestration_namespace: podinfo-local
+podinfo_orchestration_frequency: "*/2 * * * *"
+podinfo_orchestration_application_type: helm
+hazelcast_orchestration_mode: disabled
+hazelcast_orchestration_namespace: hazelcast-local
+hazelcast_orchestration_frequency: "*/2 * * * *"
+hazelcast_orchestration_application_type: helm
+hazelcast_mancenter_storage_storage_size: 8Gi
+hazelcast_service_type: LoadBalancer
